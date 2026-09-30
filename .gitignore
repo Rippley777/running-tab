@@ -1,0 +1,14 @@
+node_modules/
+dist/
+target/
+.env
+.env.local
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+.local/
+test-results/
+playwright-report/
+coverage/
+*.log
