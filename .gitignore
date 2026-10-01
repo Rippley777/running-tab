@@ -12,3 +12,9 @@ test-results/
 playwright-report/
 coverage/
 *.log
+
+.env.*
+!.env.example
+.running-tab.json
+
+src-tauri/gen/

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Running Tab",
+  "version": "0.1.0",
+  "identifier": "com.runningtab.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev:ui",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Running Tab",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 760,
+        "minHeight": 600,
+        "backgroundColor": "#151715",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "shortDescription": "Track the work. Close the tab. Get paid.",
+    "category": "Productivity",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}

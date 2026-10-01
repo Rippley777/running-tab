@@ -1,0 +1,18 @@
+[package]
+name = "running-tab-desktop"
+version.workspace = true
+edition.workspace = true
+[lib]
+name = "running_tab_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+[dependencies]
+tauri = { version = "=2.12.1", features = [] }
+tab-core = { path = "../crates/tab-core" }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+uuid.workspace = true
+rfd = "=0.17.2"
+open = "5.3.2"

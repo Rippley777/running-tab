@@ -1,22 +1,388 @@
-import {randomUUID} from 'node:crypto';
-import {sql,rows,one,required,audit,AppError,recent,type Context,type Executor} from '../db/index.js';
-import {mutate} from './common.js';
-import {invoiceSnapshot} from './invoices.js';
-import {snapshotHash,ratio} from './math.js';
-import {grantPaidBuckets} from './retainers.js';
-export async function validateOperation(tx:Executor,ctx:Context,operationId:string){const op=await required(sql`SELECT * FROM payment_operation WHERE workspace_id=${ctx.workspaceId} AND id=${operationId} FOR UPDATE`,tx);const inv=await required(sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${op.invoice_id} FOR UPDATE`,tx);const approval=await required(sql`SELECT * FROM invoice_approval WHERE workspace_id=${ctx.workspaceId} AND id=${op.approval_id}`,tx);if(approval.invalidated_at||approval.revision!==inv.revision||approval.action!==op.action||snapshotHash(await invoiceSnapshot(tx,ctx,inv.id))!==approval.snapshot_hash)throw new AppError('APPROVAL_INVALID','Approval no longer matches the invoice.');if(+new Date(approval.approved_at)<Date.now()-86400_000)throw new AppError('APPROVAL_EXPIRED','Approval expired before processing; a fresh review is required.');const account=await required(sql`SELECT * FROM connected_payment_account WHERE workspace_id=${ctx.workspaceId} AND provider=${inv.provider}`,tx);if(!account.ready||account.disconnected_at)throw new AppError('ACCOUNT_NOT_READY','The connected account is unavailable.');if(inv.paid_amount>0&&inv.paid_amount<inv.total)throw new AppError('PARTIAL_PAYMENT','An unexpected partial payment requires reconciliation.');if(['void'].includes(inv.issuance_state)||['refunded','disputed'].includes(inv.collection_state))throw new AppError('NOT_COLLECTIBLE','This invoice cannot be collected.');let profile:any=null;
- if(op.action==='charge'){profile=await one(sql`SELECT * FROM client_payment_profile WHERE workspace_id=${ctx.workspaceId} AND client_id=${inv.client_id} AND account_id=${account.account_id} AND provider=${inv.provider}`,tx);const consent=approval.consent_id?await one(sql`SELECT * FROM auto_charge_consent WHERE workspace_id=${ctx.workspaceId} AND id=${approval.consent_id} AND revoked_at IS NULL`,tx):null;if(!consent||!profile||consent.profile_id!==profile.id||profile.payment_method_id!==approval.payment_method_id)throw new AppError('CONSENT_REVOKED','The saved method or its authorization changed.');}
- return{op,inv,approval,account,profile};}
-export async function confirmPayment(tx:Executor,ctx:Context,invoiceId:string,input:{provider:'demo'|'stripe_test'|'external';account:string;reference:string;amount:number;fee?:number;operationId?:string;receivedAt?:Date}){const inv=await required(sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${invoiceId} FOR UPDATE`,tx);const old=await one(sql`SELECT id FROM payment WHERE provider=${input.provider} AND account_id=${input.account} AND provider_payment=${input.reference}`,tx);if(old)return old;
- if(inv.collection_state==='paid'||inv.paid_amount>=inv.total)return{alreadyPaid:true};if(input.amount!==inv.total-inv.paid_amount){await tx.execute(sql`UPDATE invoice SET collection_state='partial',paid_amount=${input.amount+inv.paid_amount} WHERE id=${invoiceId}`);await audit(tx,ctx,'payment.partial_detected',invoiceId,{amount:input.amount});return{partial:true};}
- const pay=await required(sql`INSERT INTO payment(workspace_id,invoice_id,operation_id,provider,account_id,provider_payment,amount,service_amount,fee,received_at) VALUES(${ctx.workspaceId},${invoiceId},${input.operationId??null},${input.provider},${input.account},${input.reference},${input.amount},${inv.subtotal-inv.discount},${input.fee??null},${input.receivedAt??new Date()}) RETURNING *`,tx);await tx.execute(sql`UPDATE invoice SET collection_state='paid',paid_amount=total,issuance_state='issued',issued_at=COALESCE(issued_at,now()) WHERE id=${invoiceId}`);await grantPaidBuckets(tx,ctx,invoiceId,pay.id);await audit(tx,ctx,'payment.confirmed',invoiceId,{paymentId:pay.id,amount:input.amount,provider:input.provider});return pay;}
-export async function runDemoOperation(ctx:Context,id:string){return mutate(ctx,'payment.process',{id},async tx=>{const existing=await required(sql`SELECT * FROM payment_operation WHERE id=${id} AND workspace_id=${ctx.workspaceId}`,tx);if(['succeeded','failed','blocked'].includes(existing.state))return existing;if(existing.state==='reconcile'){const invoice=await required(sql`SELECT * FROM invoice WHERE id=${existing.invoice_id} AND workspace_id=${ctx.workspaceId}`,tx);if(invoice.collection_state==='paid'){await tx.execute(sql`UPDATE payment_operation SET state='succeeded',finished_at=now() WHERE id=${id}`);return{state:'succeeded'};}return{state:'reconcile'};}
- try{const{op,inv,profile}=await validateOperation(tx,ctx,id);if(inv.provider!=='demo')throw new AppError('PROVIDER_MISMATCH','Demo adapter cannot call a real provider.');if(inv.collection_state==='paid'){await tx.execute(sql`UPDATE payment_operation SET state='succeeded',finished_at=now() WHERE id=${id}`);return{state:'succeeded'};}await tx.execute(sql`UPDATE invoice SET issuance_state='issued',issued_at=COALESCE(issued_at,now()) WHERE id=${inv.id}`);await audit(tx,ctx,'invoice.issued_demo',inv.id,{operationId:id});if(op.action==='charge'){if(profile.payment_method_id==='demo_declined'){await tx.execute(sql`UPDATE invoice SET collection_state='failed' WHERE id=${inv.id}`);await tx.execute(sql`UPDATE payment_operation SET state='failed',error_code='CARD_DECLINED',finished_at=now(),attempts=attempts+1 WHERE id=${id}`);await audit(tx,ctx,'payment.failed',inv.id,{code:'CARD_DECLINED'});return{state:'failed'};}await confirmPayment(tx,ctx,inv.id,{provider:'demo',account:'demo',reference:`demo-operation-${id}`,amount:inv.total,operationId:id,fee:ratio(BigInt(inv.total)*29n,1000)+30});}await tx.execute(sql`UPDATE payment_operation SET state='succeeded',attempts=attempts+1,finished_at=now() WHERE id=${id}`);return{state:'succeeded'};
- }catch(e){if(!(e instanceof AppError))throw e;await tx.execute(sql`UPDATE payment_operation SET state='blocked',error_code=${e.code},finished_at=now() WHERE id=${id}`);await tx.execute(sql`UPDATE invoice SET issuance_state=CASE WHEN issuance_state='queued' THEN 'local' ELSE issuance_state END,collection_state=CASE WHEN collection_state='processing' THEN 'unpaid' ELSE collection_state END,approval_state='review' WHERE id=${existing.invoice_id}`);await audit(tx,ctx,'payment.blocked',existing.invoice_id,{code:e.code});return{state:'blocked',code:e.code};}
- });}
-export async function demoCustomerPayment(ctx:Context,invoiceId:string,outcome:'success'|'decline'|'authentication'='success'){return mutate(ctx,'payment.customer_demo',{invoiceId,outcome},async tx=>{const inv=await required(sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${invoiceId} FOR UPDATE`,tx);if(inv.provider!=='demo'||inv.issuance_state!=='issued')throw new AppError('NOT_PAYABLE','Only issued demo invoices can use simulated payment.');if(inv.collection_state==='paid')return{alreadyPaid:true};if(outcome!=='success'){await tx.execute(sql`UPDATE invoice SET collection_state=${outcome==='decline'?'failed':'authentication_required'} WHERE id=${invoiceId}`);await audit(tx,ctx,'payment.customer_demo_failed',invoiceId,{outcome});return{state:outcome==='decline'?'failed':'authentication_required'};}return confirmPayment(tx,ctx,invoiceId,{provider:'demo',account:'demo',reference:`demo-customer-${invoiceId}`,amount:inv.total,fee:ratio(BigInt(inv.total)*29n,1000)+30});});}
-export async function externalPayment(ctx:Context,id:string,reference:string){recent(ctx);return mutate(ctx,'payment.external',{id,reference},async tx=>{const inv=await required(sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${id} FOR UPDATE`,tx);if(inv.provider!=='demo')throw new AppError('RECONCILE_PROVIDER','Record out-of-band payment in Stripe, then reconcile. No collection is attempted.');if(inv.issuance_state!=='issued'||inv.collection_state==='paid')throw new AppError('NOT_PAYABLE','External payment needs an unpaid issued invoice.');if(await one(sql`SELECT id FROM payment_operation WHERE invoice_id=${id} AND state IN ('queued','processing','reconcile')`,tx))throw new AppError('OPERATION_PENDING','Wait for reconciliation before recording an external payment.');const p=await confirmPayment(tx,ctx,id,{provider:'external',account:ctx.workspaceId,reference,amount:inv.total});await audit(tx,ctx,'payment.external_recorded',id,{reference});return p;});}
-export async function demoConsent(ctx:Context,clientId:string,method='demo_4242'){return mutate(ctx,'consent.demo',{clientId,method},async tx=>{const w=await required(sql`SELECT demo FROM workspace WHERE id=${ctx.workspaceId}`,tx);if(!w.demo)throw new AppError('DEMO_ONLY','Simulated consent is only available in the isolated demo workspace.');await required(sql`SELECT id FROM client WHERE workspace_id=${ctx.workspaceId} AND id=${clientId}`,tx);const profile=await required(sql`INSERT INTO client_payment_profile(workspace_id,client_id,provider,account_id,customer_id,payment_method_id,card_suffix) VALUES(${ctx.workspaceId},${clientId},'demo','demo',${`demo-client-${clientId}`},${method},'4242') ON CONFLICT(workspace_id,client_id,provider,account_id) DO UPDATE SET payment_method_id=excluded.payment_method_id RETURNING *`,tx);await tx.execute(sql`INSERT INTO auto_charge_consent(workspace_id,client_id,profile_id,terms_version,frequency,amount_policy,accepted_at) VALUES(${ctx.workspaceId},${clientId},${profile.id},'demo-v1','Per explicitly approved invoice','Exact approved invoice total in USD',now())`);await audit(tx,ctx,'consent.demo_recorded',clientId);return{ok:true};});}
-export async function revokeConsent(ctx:Context,clientId:string){return mutate(ctx,'consent.revoke',{clientId},async tx=>{await tx.execute(sql`UPDATE auto_charge_consent SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId} AND client_id=${clientId} AND revoked_at IS NULL`);await audit(tx,ctx,'consent.revoked',clientId);return{ok:true};});}
-export async function processDemoQueue(){const jobs=await rows(sql`SELECT o.id,o.workspace_id,w.owner_id FROM payment_operation o JOIN workspace w ON w.id=o.workspace_id JOIN invoice i ON i.id=o.invoice_id WHERE o.state='queued' AND i.provider='demo' ORDER BY o.created_at LIMIT 50`);for(const j of jobs)await runDemoOperation({workspaceId:j.workspace_id,userId:j.owner_id,verifiedAt:new Date(),scopes:['financial']},j.id);return jobs.length;}
-export {randomUUID};
+import { randomUUID } from "node:crypto";
+import {
+  sql,
+  rows,
+  one,
+  required,
+  audit,
+  AppError,
+  recent,
+  type Context,
+  type Executor,
+} from "../db/index.js";
+import { mutate } from "./common.js";
+import { invoiceSnapshot } from "./invoices.js";
+import { snapshotHash, ratio } from "./math.js";
+import { grantPaidBuckets } from "./retainers.js";
+export async function validateOperation(
+  tx: Executor,
+  ctx: Context,
+  operationId: string,
+) {
+  const op = await required(
+    sql`SELECT * FROM payment_operation WHERE workspace_id=${ctx.workspaceId} AND id=${operationId} FOR UPDATE`,
+    tx,
+  );
+  const inv = await required(
+    sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${op.invoice_id} FOR UPDATE`,
+    tx,
+  );
+  const approval = await required(
+    sql`SELECT * FROM invoice_approval WHERE workspace_id=${ctx.workspaceId} AND id=${op.approval_id}`,
+    tx,
+  );
+  if (
+    approval.invalidated_at ||
+    approval.revision !== inv.revision ||
+    approval.action !== op.action ||
+    snapshotHash(await invoiceSnapshot(tx, ctx, inv.id)) !==
+      approval.snapshot_hash
+  )
+    throw new AppError(
+      "APPROVAL_INVALID",
+      "Approval no longer matches the invoice.",
+    );
+  if (+new Date(approval.approved_at) < Date.now() - 86400_000)
+    throw new AppError(
+      "APPROVAL_EXPIRED",
+      "Approval expired before processing; a fresh review is required.",
+    );
+  const account = await required(
+    sql`SELECT * FROM connected_payment_account WHERE workspace_id=${ctx.workspaceId} AND provider=${inv.provider}`,
+    tx,
+  );
+  if (!account.ready || account.disconnected_at)
+    throw new AppError(
+      "ACCOUNT_NOT_READY",
+      "The connected account is unavailable.",
+    );
+  if (inv.paid_amount > 0 && inv.paid_amount < inv.total)
+    throw new AppError(
+      "PARTIAL_PAYMENT",
+      "An unexpected partial payment requires reconciliation.",
+    );
+  if (
+    ["void"].includes(inv.issuance_state) ||
+    ["refunded", "disputed"].includes(inv.collection_state)
+  )
+    throw new AppError("NOT_COLLECTIBLE", "This invoice cannot be collected.");
+  let profile: any = null;
+  if (op.action === "charge") {
+    profile = await one(
+      sql`SELECT * FROM client_payment_profile WHERE workspace_id=${ctx.workspaceId} AND client_id=${inv.client_id} AND account_id=${account.account_id} AND provider=${inv.provider}`,
+      tx,
+    );
+    const consent = approval.consent_id
+      ? await one(
+          sql`SELECT * FROM auto_charge_consent WHERE workspace_id=${ctx.workspaceId} AND id=${approval.consent_id} AND revoked_at IS NULL`,
+          tx,
+        )
+      : null;
+    if (
+      !consent ||
+      !profile ||
+      consent.profile_id !== profile.id ||
+      profile.payment_method_id !== approval.payment_method_id
+    )
+      throw new AppError(
+        "CONSENT_REVOKED",
+        "The saved method or its authorization changed.",
+      );
+  }
+  return { op, inv, approval, account, profile };
+}
+export async function confirmPayment(
+  tx: Executor,
+  ctx: Context,
+  invoiceId: string,
+  input: {
+    provider: "demo" | "stripe_test" | "external";
+    account: string;
+    reference: string;
+    amount: number;
+    fee?: number;
+    operationId?: string;
+    receivedAt?: Date;
+  },
+) {
+  const inv = await required(
+    sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${invoiceId} FOR UPDATE`,
+    tx,
+  );
+  const old = await one(
+    sql`SELECT id FROM payment WHERE provider=${input.provider} AND account_id=${input.account} AND provider_payment=${input.reference}`,
+    tx,
+  );
+  if (old) return old;
+  if (inv.collection_state === "paid" || inv.paid_amount >= inv.total)
+    return { alreadyPaid: true };
+  if (
+    !Number.isSafeInteger(input.amount) ||
+    input.amount <= 0 ||
+    input.amount > inv.total - inv.paid_amount
+  )
+    throw new AppError(
+      "PAYMENT_MISMATCH",
+      "Reconcile the provider amount before recording this payment.",
+    );
+  const serviceTotal = inv.subtotal - inv.discount;
+  const beforeService = ratio(
+    BigInt(inv.paid_amount) * BigInt(serviceTotal),
+    inv.total,
+  );
+  const afterService = ratio(
+    BigInt(inv.paid_amount + input.amount) * BigInt(serviceTotal),
+    inv.total,
+  );
+  const pay = await required(
+    sql`INSERT INTO payment(workspace_id,invoice_id,operation_id,provider,account_id,provider_payment,amount,service_amount,fee,received_at) VALUES(${ctx.workspaceId},${invoiceId},${input.operationId ?? null},${input.provider},${input.account},${input.reference},${input.amount},${afterService - beforeService},${input.fee ?? null},${input.receivedAt ?? new Date()}) RETURNING *`,
+    tx,
+  );
+  if (input.amount !== inv.total - inv.paid_amount) {
+    await tx.execute(
+      sql`UPDATE invoice SET collection_state='partial',paid_amount=${input.amount + inv.paid_amount} WHERE id=${invoiceId}`,
+    );
+    await audit(tx, ctx, "payment.partial_detected", invoiceId, {
+      amount: input.amount,
+    });
+    return { ...pay, partial: true };
+  }
+  await tx.execute(
+    sql`UPDATE invoice SET collection_state='paid',paid_amount=total,issuance_state='issued',issued_at=COALESCE(issued_at,now()) WHERE id=${invoiceId}`,
+  );
+  await grantPaidBuckets(tx, ctx, invoiceId, pay.id);
+  await tx.execute(
+    sql`INSERT INTO delivery_outbox(workspace_id,invoice_id,kind,dedup_key) VALUES(${ctx.workspaceId},${invoiceId},'receipt',${`receipt:${invoiceId}`}) ON CONFLICT(dedup_key) DO NOTHING`,
+  );
+  await audit(tx, ctx, "payment.confirmed", invoiceId, {
+    paymentId: pay.id,
+    amount: input.amount,
+    provider: input.provider,
+  });
+  return pay;
+}
+export async function runDemoOperation(ctx: Context, id: string) {
+  return mutate(ctx, "payment.process", { id }, async (tx) => {
+    const existing = await required(
+      sql`SELECT * FROM payment_operation WHERE id=${id} AND workspace_id=${ctx.workspaceId}`,
+      tx,
+    );
+    if (["succeeded", "failed", "blocked"].includes(existing.state))
+      return existing;
+    if (existing.state === "reconcile") {
+      const invoice = await required(
+        sql`SELECT * FROM invoice WHERE id=${existing.invoice_id} AND workspace_id=${ctx.workspaceId}`,
+        tx,
+      );
+      if (invoice.collection_state === "paid") {
+        await tx.execute(
+          sql`UPDATE payment_operation SET state='succeeded',finished_at=now() WHERE id=${id}`,
+        );
+        return { state: "succeeded" };
+      }
+      return { state: "reconcile" };
+    }
+    try {
+      const { op, inv, profile } = await validateOperation(tx, ctx, id);
+      if (inv.provider !== "demo")
+        throw new AppError(
+          "PROVIDER_MISMATCH",
+          "Demo adapter cannot call a real provider.",
+        );
+      if (inv.collection_state === "paid") {
+        await tx.execute(
+          sql`UPDATE payment_operation SET state='succeeded',finished_at=now() WHERE id=${id}`,
+        );
+        return { state: "succeeded" };
+      }
+      await tx.execute(
+        sql`UPDATE invoice SET issuance_state='issued',issued_at=COALESCE(issued_at,now()) WHERE id=${inv.id}`,
+      );
+      await audit(tx, ctx, "invoice.issued_demo", inv.id, { operationId: id });
+      if (op.action === "send")
+        await tx.execute(
+          sql`INSERT INTO delivery_outbox(workspace_id,invoice_id,kind,dedup_key) VALUES(${ctx.workspaceId},${inv.id},'invoice',${`invoice:${id}`}) ON CONFLICT(dedup_key) DO NOTHING`,
+        );
+      if (op.action === "charge") {
+        if (profile.payment_method_id === "demo_declined") {
+          await tx.execute(
+            sql`UPDATE invoice SET collection_state='failed' WHERE id=${inv.id}`,
+          );
+          await tx.execute(
+            sql`UPDATE payment_operation SET state='failed',error_code='CARD_DECLINED',finished_at=now(),attempts=attempts+1 WHERE id=${id}`,
+          );
+          await audit(tx, ctx, "payment.failed", inv.id, {
+            code: "CARD_DECLINED",
+          });
+          return { state: "failed" };
+        }
+        await confirmPayment(tx, ctx, inv.id, {
+          provider: "demo",
+          account: "demo",
+          reference: `demo-operation-${id}`,
+          amount: inv.total,
+          operationId: id,
+          fee: ratio(BigInt(inv.total) * 29n, 1000) + 30,
+        });
+      }
+      await tx.execute(
+        sql`UPDATE payment_operation SET state='succeeded',attempts=attempts+1,finished_at=now() WHERE id=${id}`,
+      );
+      return { state: "succeeded" };
+    } catch (e) {
+      if (!(e instanceof AppError)) throw e;
+      await tx.execute(
+        sql`UPDATE payment_operation SET state='blocked',error_code=${e.code},finished_at=now() WHERE id=${id}`,
+      );
+      await tx.execute(
+        sql`UPDATE invoice SET issuance_state=CASE WHEN issuance_state='queued' THEN 'local' ELSE issuance_state END,collection_state=CASE WHEN collection_state='processing' THEN 'unpaid' ELSE collection_state END,approval_state='review' WHERE id=${existing.invoice_id}`,
+      );
+      await audit(tx, ctx, "payment.blocked", existing.invoice_id, {
+        code: e.code,
+      });
+      return { state: "blocked", code: e.code };
+    }
+  });
+}
+export async function demoCustomerPayment(
+  ctx: Context,
+  invoiceId: string,
+  outcome: "success" | "decline" | "authentication" = "success",
+) {
+  return mutate(
+    ctx,
+    "payment.customer_demo",
+    { invoiceId, outcome },
+    async (tx) => {
+      const inv = await required(
+        sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${invoiceId} FOR UPDATE`,
+        tx,
+      );
+      if (inv.provider !== "demo" || inv.issuance_state !== "issued")
+        throw new AppError(
+          "NOT_PAYABLE",
+          "Only issued demo invoices can use simulated payment.",
+        );
+      if (inv.collection_state === "paid") return { alreadyPaid: true };
+      if (outcome !== "success") {
+        await tx.execute(
+          sql`UPDATE invoice SET collection_state=${outcome === "decline" ? "failed" : "authentication_required"} WHERE id=${invoiceId}`,
+        );
+        await audit(tx, ctx, "payment.customer_demo_failed", invoiceId, {
+          outcome,
+        });
+        return {
+          state: outcome === "decline" ? "failed" : "authentication_required",
+        };
+      }
+      return confirmPayment(tx, ctx, invoiceId, {
+        provider: "demo",
+        account: "demo",
+        reference: `demo-customer-${invoiceId}`,
+        amount: inv.total,
+        fee: ratio(BigInt(inv.total) * 29n, 1000) + 30,
+      });
+    },
+  );
+}
+export async function externalPayment(
+  ctx: Context,
+  id: string,
+  reference: string,
+) {
+  recent(ctx);
+  return mutate(ctx, "payment.external", { id, reference }, async (tx) => {
+    const inv = await required(
+      sql`SELECT * FROM invoice WHERE workspace_id=${ctx.workspaceId} AND id=${id} FOR UPDATE`,
+      tx,
+    );
+    if (inv.provider !== "demo")
+      throw new AppError(
+        "RECONCILE_PROVIDER",
+        "Record out-of-band payment in Stripe, then reconcile. No collection is attempted.",
+      );
+    if (inv.issuance_state !== "issued" || inv.collection_state === "paid")
+      throw new AppError(
+        "NOT_PAYABLE",
+        "External payment needs an unpaid issued invoice.",
+      );
+    if (
+      await one(
+        sql`SELECT id FROM payment_operation WHERE invoice_id=${id} AND state IN ('queued','processing','reconcile')`,
+        tx,
+      )
+    )
+      throw new AppError(
+        "OPERATION_PENDING",
+        "Wait for reconciliation before recording an external payment.",
+      );
+    const p = await confirmPayment(tx, ctx, id, {
+      provider: "external",
+      account: ctx.workspaceId,
+      reference,
+      amount: inv.total,
+    });
+    await audit(tx, ctx, "payment.external_recorded", id, { reference });
+    return p;
+  });
+}
+export async function demoConsent(
+  ctx: Context,
+  clientId: string,
+  method = "demo_4242",
+) {
+  return mutate(ctx, "consent.demo", { clientId, method }, async (tx) => {
+    const w = await required(
+      sql`SELECT demo FROM workspace WHERE id=${ctx.workspaceId}`,
+      tx,
+    );
+    if (!w.demo)
+      throw new AppError(
+        "DEMO_ONLY",
+        "Simulated consent is only available in the isolated demo workspace.",
+      );
+    await required(
+      sql`SELECT id FROM client WHERE workspace_id=${ctx.workspaceId} AND id=${clientId}`,
+      tx,
+    );
+    const account = await required(
+      sql`SELECT account_id FROM connected_payment_account WHERE workspace_id=${ctx.workspaceId} AND provider='demo'`,
+      tx,
+    );
+    const profile = await required(
+      sql`INSERT INTO client_payment_profile(workspace_id,client_id,provider,account_id,customer_id,payment_method_id,card_suffix) VALUES(${ctx.workspaceId},${clientId},'demo',${account.account_id},${`demo-client-${clientId}`},${method},'4242') ON CONFLICT(workspace_id,client_id,provider,account_id) DO UPDATE SET payment_method_id=excluded.payment_method_id RETURNING *`,
+      tx,
+    );
+    await tx.execute(
+      sql`INSERT INTO auto_charge_consent(workspace_id,client_id,profile_id,terms_version,frequency,amount_policy,accepted_at) VALUES(${ctx.workspaceId},${clientId},${profile.id},'demo-v1','Per explicitly approved invoice','Exact approved invoice total in USD',now())`,
+    );
+    await audit(tx, ctx, "consent.demo_recorded", clientId);
+    return { ok: true };
+  });
+}
+export async function revokeConsent(ctx: Context, clientId: string) {
+  return mutate(ctx, "consent.revoke", { clientId }, async (tx) => {
+    await tx.execute(
+      sql`UPDATE auto_charge_consent SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId} AND client_id=${clientId} AND revoked_at IS NULL`,
+    );
+    await audit(tx, ctx, "consent.revoked", clientId);
+    return { ok: true };
+  });
+}
+export async function processDemoQueue(workspaceId?: string) {
+  const jobs = await rows(
+    sql`SELECT o.id,o.workspace_id,w.owner_id FROM payment_operation o JOIN workspace w ON w.id=o.workspace_id JOIN invoice i ON i.id=o.invoice_id WHERE o.state='queued' AND i.provider='demo' ${workspaceId ? sql`AND o.workspace_id=${workspaceId}` : sql``} ORDER BY o.created_at LIMIT 50`,
+  );
+  for (const j of jobs)
+    await runDemoOperation(
+      {
+        workspaceId: j.workspace_id,
+        userId: j.owner_id,
+        verifiedAt: new Date(),
+        scopes: ["financial"],
+      },
+      j.id,
+    );
+  return jobs.length;
+}
+export { randomUUID };

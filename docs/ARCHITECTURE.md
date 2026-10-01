@@ -30,4 +30,4 @@ Timer start/switch serializes writers and enforces one active timer per owner. S
 - Stripe invoice approval controls: https://docs.stripe.com/api/invoices/update
 - Stripe invoice collection: https://docs.stripe.com/api/invoices/pay
 
-The original Next.js/Better Auth/PostgreSQL stack was inspected before the desktop change. The native decision supersedes the web deployment architecture; implementation status will distinguish local features from hosted-service requirements.
+The desktop decision replaced Next.js presentation with packaged Vite/React assets and a Fastify API while retaining Better Auth, PostgreSQL and the cloud deployment model. [Implementation status](STATUS.md) distinguishes locally verified features from hosted-service requirements.

@@ -4,7 +4,7 @@ Track the work. Close the tab. Get paid.
 
 A quiet, precise desktop workspace for an independent developer. The primary loop is intentional time capture → review evidence → allocate eligible work → review an exact invoice → explicitly approve a financial action → reconcile confirmed payment.
 
-The user changed the original web-first brief to a native Rust application with a web-based interface. Use Tauri 2, a Rust domain core, and a React/TypeScript interface. Target macOS first. Product naming lives in `brand.json`.
+The user changed the original web-first brief to a native Rust application with a web-based interface. Use Tauri 2, a Rust native core, and a React/TypeScript interface. Target macOS first. Product naming lives in `brand.json`.
 
 The first complete slice must work without external credentials. Demo payment is conspicuously labeled and cannot invoke a real provider. Successful payment, approval, invoice issuance, and time classification remain separate concepts. USD only. Never infer hours from Git activity.
 

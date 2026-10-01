@@ -1,17 +1,164 @@
-import {betterAuth} from 'better-auth';
-import {magicLink,bearer} from 'better-auth/plugins';
-import nodemailer from 'nodemailer';
-import {randomBytes,createHash} from 'node:crypto';
-import {pool,sql,one,required,rows,db,AppError,recent,type Context} from './db/index.js';
-import {config,demoEnabled} from './config.js';
-export const demoMagicLinks=new Map<string,string>();
-const mail=nodemailer.createTransport({host:process.env.SMTP_HOST??'127.0.0.1',port:Number(process.env.SMTP_PORT??1025),secure:false,...(process.env.SMTP_USER?{auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASSWORD}}:{})});
-export const auth=betterAuth({appName:'Running Tab',database:pool,baseURL:config.APP_URL,secret:config.BETTER_AUTH_SECRET,trustedOrigins:[config.APP_URL],emailAndPassword:{enabled:false},session:{expiresIn:7*86400,updateAge:86400,freshAge:15*60,cookieCache:{enabled:false}},account:{accountLinking:{enabled:false}},rateLimit:{enabled:true,window:60,max:30},socialProviders:process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET?{google:{clientId:process.env.GOOGLE_CLIENT_ID,clientSecret:process.env.GOOGLE_CLIENT_SECRET}}:{},plugins:[bearer({requireSignature:true}),magicLink({expiresIn:600,storeToken:'hashed',rateLimit:{window:60,max:5},sendMagicLink:async({email,url})=>{if(demoEnabled&&email==='alex@demo.runningtab.test'){demoMagicLinks.set(email,url);return;}await mail.sendMail({from:process.env.SMTP_FROM??'Running Tab <hello@runningtab.test>',to:email,subject:'Your Running Tab sign-in link',text:`Sign in to Running Tab:\n\n${url}\n\nThis single-use link expires in 10 minutes.`});}})]});
-export const tokenHash=(token:string)=>createHash('sha256').update(token).digest('hex');
-export function requestHeaders(input:Record<string,unknown>){const h=new Headers();for(const[k,v]of Object.entries(input))if(typeof v==='string')h.set(k,v);return h;}
-export async function identity(headers:Headers){const token=headers.get('authorization')?.replace(/^Bearer /,'');if(token?.startsWith('rt_')){const d=await one(sql`SELECT d.*,u.name,u.email FROM device_credential d JOIN "user" u ON u.id=d.user_id WHERE token_hash=${tokenHash(token)} AND revoked_at IS NULL AND expires_at>now()`);if(!d)throw new AppError('UNAUTHORIZED','This device credential is expired or revoked.',401);return{user:{id:d.user_id,name:d.name,email:d.email},verifiedAt:new Date(d.verified_at),scopes:d.scopes as string[],workspaceId:d.workspace_id,deviceId:d.id};}const session=await auth.api.getSession({headers});if(!session)throw new AppError('UNAUTHORIZED','Sign in to your workspace.',401);return{user:session.user,verifiedAt:new Date(session.session.createdAt),scopes:['read','write','financial'],workspaceId:undefined,deviceId:undefined};}
-export async function context(headers:Headers):Promise<Context>{const who=await identity(headers);const w=await one(sql`SELECT workspace_id FROM membership WHERE user_id=${who.user.id}`);if(!w)throw new AppError('ONBOARDING_REQUIRED','Create your workspace to get started.',428);if(who.workspaceId&&who.workspaceId!==w.workspace_id)throw new AppError('FORBIDDEN','Workspace access denied.',403);return{workspaceId:w.workspace_id,userId:who.user.id,verifiedAt:who.verifiedAt,scopes:who.scopes};}
-export function requireScope(ctx:Context,scope:string){if(!ctx.scopes.includes(scope)&&!(scope.endsWith(':write')&&ctx.scopes.includes('write')))throw new AppError('FORBIDDEN','This device credential does not permit this operation.',403);}
-export async function issueDevice(ctx:Context,name:string,kind:'desktop'|'cli'){recent(ctx);requireScope(ctx,'financial');const token=`rt_${randomBytes(32).toString('base64url')}`;const row=await required(sql`INSERT INTO device_credential(workspace_id,user_id,name,token_hash,scopes,expires_at) VALUES(${ctx.workspaceId},${ctx.userId},${name},${tokenHash(token)},${kind==='desktop'?['read','write','financial']:['read','time:write','context:write']},now()+interval '30 days') RETURNING id,expires_at`);return{...row,token};}
-export async function revokeDevices(ctx:Context,id?:string){recent(ctx);requireScope(ctx,'financial');if(id)await db.execute(sql`UPDATE device_credential SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId} AND id=${id}`);else{await db.execute(sql`UPDATE device_credential SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId}`);await db.execute(sql`DELETE FROM session WHERE "userId"=${ctx.userId}`);}return{ok:true};}
-export async function devices(ctx:Context){return rows(sql`SELECT id,name,scopes,created_at,expires_at,revoked_at FROM device_credential WHERE workspace_id=${ctx.workspaceId} ORDER BY created_at DESC`);}
+import { betterAuth } from "better-auth";
+import { magicLink, bearer } from "better-auth/plugins";
+import { sendMail } from "./integrations/email.js";
+import { randomBytes, createHash } from "node:crypto";
+import {
+  pool,
+  sql,
+  one,
+  required,
+  rows,
+  db,
+  AppError,
+  recent,
+  type Context,
+} from "./db/index.js";
+import { config, demoEnabled } from "./config.js";
+export const demoMagicLinks = new Map<string, string>();
+export const auth = betterAuth({
+  appName: "Running Tab",
+  database: pool,
+  baseURL: config.APP_URL,
+  secret: config.BETTER_AUTH_SECRET,
+  trustedOrigins: [config.APP_URL],
+  emailAndPassword: { enabled: false },
+  session: {
+    expiresIn: 7 * 86400,
+    updateAge: 86400,
+    freshAge: 15 * 60,
+    cookieCache: { enabled: false },
+  },
+  account: { accountLinking: { enabled: false } },
+  rateLimit: { enabled: true, window: 60, max: 30 },
+  socialProviders:
+    process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+      ? {
+          google: {
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          },
+        }
+      : {},
+  plugins: [
+    bearer({ requireSignature: true }),
+    magicLink({
+      expiresIn: 600,
+      storeToken: "hashed",
+      rateLimit: { window: 60, max: 5 },
+      sendMagicLink: async ({ email, url }) => {
+        if (demoEnabled && email === "alex@demo.runningtab.test") {
+          demoMagicLinks.set(email, url);
+          return;
+        }
+        await sendMail(
+          email,
+          "Your Running Tab sign-in link",
+          `Sign in to Running Tab:\n\n${url}\n\nThis single-use link expires in 10 minutes.`,
+        );
+      },
+    }),
+  ],
+});
+export const tokenHash = (token: string) =>
+  createHash("sha256").update(token).digest("hex");
+export function requestHeaders(input: Record<string, unknown>) {
+  const h = new Headers();
+  for (const [k, v] of Object.entries(input))
+    if (typeof v === "string") h.set(k, v);
+  return h;
+}
+export async function identity(headers: Headers) {
+  const token = headers.get("authorization")?.replace(/^Bearer /, "");
+  if (token?.startsWith("rt_")) {
+    const d = await one(
+      sql`SELECT d.*,u.name,u.email FROM device_credential d JOIN "user" u ON u.id=d.user_id WHERE token_hash=${tokenHash(token)} AND revoked_at IS NULL AND expires_at>now()`,
+    );
+    if (!d)
+      throw new AppError(
+        "UNAUTHORIZED",
+        "This device credential is expired or revoked.",
+        401,
+      );
+    return {
+      user: { id: d.user_id, name: d.name, email: d.email },
+      verifiedAt: new Date(d.verified_at),
+      scopes: d.scopes as string[],
+      workspaceId: d.workspace_id,
+      deviceId: d.id,
+    };
+  }
+  const session = await auth.api.getSession({ headers });
+  if (!session)
+    throw new AppError("UNAUTHORIZED", "Sign in to your workspace.", 401);
+  return {
+    user: session.user,
+    verifiedAt: new Date(session.session.createdAt),
+    scopes: ["read", "write", "financial"],
+    workspaceId: undefined,
+    deviceId: undefined,
+  };
+}
+export async function context(headers: Headers): Promise<Context> {
+  const who = await identity(headers);
+  const w = await one(
+    sql`SELECT workspace_id FROM membership WHERE user_id=${who.user.id}`,
+  );
+  if (!w)
+    throw new AppError(
+      "ONBOARDING_REQUIRED",
+      "Create your workspace to get started.",
+      428,
+    );
+  if (who.workspaceId && who.workspaceId !== w.workspace_id)
+    throw new AppError("FORBIDDEN", "Workspace access denied.", 403);
+  return {
+    workspaceId: w.workspace_id,
+    userId: who.user.id,
+    verifiedAt: who.verifiedAt,
+    scopes: who.scopes,
+  };
+}
+export function requireScope(ctx: Context, scope: string) {
+  if (
+    !ctx.scopes.includes(scope) &&
+    !(scope.endsWith(":write") && ctx.scopes.includes("write"))
+  )
+    throw new AppError(
+      "FORBIDDEN",
+      "This device credential does not permit this operation.",
+      403,
+    );
+}
+export async function issueDevice(
+  ctx: Context,
+  name: string,
+  kind: "desktop" | "cli",
+) {
+  recent(ctx);
+  requireScope(ctx, "financial");
+  const token = `rt_${randomBytes(32).toString("base64url")}`;
+  const row = await required<{ id: string; expires_at: Date }>(
+    sql`INSERT INTO device_credential(workspace_id,user_id,name,token_hash,scopes,expires_at) VALUES(${ctx.workspaceId},${ctx.userId},${name},${tokenHash(token)},${sql.param(kind === "desktop" ? ["read", "write", "financial"] : ["read", "time:write", "context:write"])},now()+interval '30 days') RETURNING id,expires_at`,
+  );
+  return { ...row, token };
+}
+export async function revokeDevices(ctx: Context, id?: string) {
+  recent(ctx);
+  requireScope(ctx, "financial");
+  if (id)
+    await db.execute(
+      sql`UPDATE device_credential SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+  else {
+    await db.execute(
+      sql`UPDATE device_credential SET revoked_at=now() WHERE workspace_id=${ctx.workspaceId}`,
+    );
+    await db.execute(sql`DELETE FROM session WHERE "userId"=${ctx.userId}`);
+  }
+  return { ok: true };
+}
+export async function devices(ctx: Context) {
+  return rows(
+    sql`SELECT id,name,scopes,created_at,expires_at,revoked_at FROM device_credential WHERE workspace_id=${ctx.workspaceId} ORDER BY created_at DESC`,
+  );
+}

@@ -11,7 +11,7 @@
     "dev:api": "tsx watch --env-file=.env server/index.ts",
     "dev:ui": "vite --host 127.0.0.1 --port 1420",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "npm run brand:sync && tauri build",
     "worker": "tsx --env-file=.env server/worker.ts",
     "db:migrate": "tsx --env-file=.env scripts/migrate.ts",
     "db:seed": "tsx --env-file=.env scripts/seed.ts",
@@ -20,10 +20,14 @@
     "lint": "eslint .",
     "build": "tsc --noEmit && vite build",
     "start": "tsx --env-file=.env server/index.ts",
-    "test": "node --env-file=.env ./node_modules/vitest/vitest.mjs run",
+    "test": "tsx --env-file=.env scripts/test.ts",
     "test:e2e": "playwright test",
     "test:rust": "cargo test -p tab-core",
-    "check": "npm run typecheck && npm run lint && npm test && npm run build"
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "brand:sync": "tsx scripts/brand.ts",
+    "format": "prettier --write src server shared scripts tests docs *.{ts,json,yml} README.md",
+    "test:cli": "cargo build -p tab-cli --locked && tsx --env-file=.env scripts/check-cli.ts",
+    "test:seed": "tsx --env-file=.env scripts/check-seed.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",
@@ -40,6 +44,7 @@
     "fastify": "5.12.5",
     "lucide-react": "1.49.0",
     "nodemailer": "10.0.13",
+    "openai": "7.25.0",
     "pg": "8.23.1",
     "pg-boss": "12.35.1",
     "react": "19.3.0",
@@ -48,6 +53,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
@@ -62,6 +68,7 @@
     "eslint": "10.11.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.7",
+    "prettier": "3.9.9",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.15",
     "typescript": "6.0.3",

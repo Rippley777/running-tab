@@ -1,0 +1,10 @@
+node_modules
+target
+.local
+.env
+.env.*
+.git
+test-results
+playwright-report
+coverage
+*.log
