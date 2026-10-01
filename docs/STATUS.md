@@ -23,7 +23,7 @@ Last verified: September 30, 2026. This is a working local MVP with a native mac
 - `cargo test -p tab-core --locked`: **four Rust tests** cover origin/path restrictions and sanitized Git metadata. `cargo check --workspace --locked` and Rust formatting pass.
 - `npm run test:cli`: built CLI exercised against the local API using an isolated fictional workspace and temporary Git repository; project mapping, metadata preview/upload and start/status/stop verified.
 - `npm run test:seed`: fresh temporary PostgreSQL database, all migrations and deterministic service-backed seed verified: **five clients, eight projects, 56 entries, seven invoices**; payment/ledger totals reconcile and prepaid balances are nonnegative.
-- Debug `.app` bundle builds and launches on this Apple Silicon Mac. Native sign-in retention, packaged UI, command palette and compact-window creation were inspected directly on the preceding build. The final rebuilt binary is awaiting the owner's macOS keychain authorization before its last visual check; the computer-use tool cannot access that protected system dialog.
+- The final debug `.app` bundle builds and launches on this Apple Silicon Mac. After macOS keychain authorization cleared, saved sign-in, the packaged dashboard, command palette and compact timer layout were inspected directly. Closing the compact window retained the running server timer. The main app is left open on Today.
 
 The frontend build currently emits an approximately 834 kB minified JavaScript chunk (229 kB gzip); further route splitting and large-data performance work remain. Passing local tests is not external provider or production certification.
 
