@@ -1,3 +1,4 @@
+import { DevelopmentPage, NativeCollector } from "./pages/Development";
 import { useEffect, useState } from "react";
 import {
   useMutation,
@@ -52,6 +53,7 @@ const navigation = [
   { path: "clients", label: "Clients", icon: Users },
   { path: "projects", label: "Projects", icon: Folder },
   { path: "time", label: "Time", icon: Clock3 },
+  { path: "development", label: "Development", icon: Folder },
   { path: "billing", label: "Billing", icon: ReceiptText },
   { path: "reports", label: "Reports", icon: ChartNoAxesCombined },
 ];
@@ -661,11 +663,14 @@ export default function App() {
             <button onClick={() => q.refetch()}>Retry</button>
           </div>
         )}
+        <NativeCollector data={data} />
         <main id="main" className="main-content">
           {page === "today" || page === "" ? (
             <Today data={data} />
           ) : page === "time" ? (
             <TimePage data={data} />
+          ) : page === "development" ? (
+            <DevelopmentPage data={data} />
           ) : page === "clients" ? (
             <ClientsPage data={data} clientId={id} />
           ) : page === "projects" ? (

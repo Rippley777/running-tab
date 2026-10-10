@@ -31,3 +31,11 @@ Timer start/switch serializes writers and enforces one active timer per owner. S
 - Stripe invoice collection: https://docs.stripe.com/api/invoices/pay
 
 The desktop decision replaced Next.js presentation with packaged Vite/React assets and a Fastify API while retaining Better Auth, PostgreSQL and the cloud deployment model. [Implementation status](STATUS.md) distinguishes locally verified features from hosted-service requirements.
+
+## Development sessions
+
+`tab-core::tracking` observes only explicitly approved local repository paths. A native 30-second poll compares file metadata and Git branch/HEAD metadata. Persistent session IDs and atomic local saves survive restart; gaps above 90 seconds reset baselines. No financial records are created offline. The authenticated API snapshot establishes the native workspace scope before local paths can be read through IPC.
+
+The desktop retains raw local observations in `development-activity-v1.json` under Tauri's application-local-data directory (owner-only file permissions on Unix). Repository paths never enter PostgreSQL. Completed summaries sync through `/api/v1/development-sessions`; the server independently bounds inferred duration by supporting file events. Upload retries are immutable by source ID. Mappings are resolved once, while review drafts remain editable. A retained tombstone prevents discarded/deleted sessions from resurfacing.
+
+Session approval calls the shared manual-entry transaction helper, snapshots existing rate/rounding rules, rejects overlaps, and links the reviewed entry to its source session. Owner/workspace serialization plus a unique source-session index prevents concurrent duplicate approval. Existing invoice locks and source reservation remain authoritative. The full workflow and conditional integrations are documented in [Git tracking](GIT_TRACKING.md).

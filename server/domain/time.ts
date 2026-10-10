@@ -75,47 +75,61 @@ export async function manualEntry(
     "time.create",
     v,
     async (tx) => {
-      const p = await ownedProject(tx, ctx, v.projectId);
-      if (p.status !== "active" || p.client_archived)
-        throw new AppError(
-          "ARCHIVED",
-          "Reopen this project before recording work.",
-        );
-      await ensureTask(tx, ctx, p.id, v.taskId);
-      const start = new Date(v.startedAt),
-        end = new Date(v.endedAt);
-      const duration = (+end - +start) / 1000;
-      if (duration < 1 || duration > 7 * 86400 || +end > Date.now() + 60_000)
-        throw new AppError(
-          "INVALID_DURATION",
-          "Use a past interval between one second and seven days.",
-        );
-      const overlap = await one(
-        sql`SELECT id FROM time_entry WHERE workspace_id=${ctx.workspaceId} AND user_id=${ctx.userId} AND deleted_at IS NULL AND started_at<${end} AND ended_at>${start} LIMIT 1`,
-        tx,
-      );
-      if (overlap && !v.acknowledgeOverlap)
-        throw new AppError(
-          "OVERLAP",
-          "This overlaps existing work. Review the interval or explicitly keep the overlap.",
-          409,
-        );
-      const result = await insertEntry(tx, ctx, {
-        ...v,
-        startedAt: start,
-        endedAt: end,
-        rate: v.rateOverride ?? p.rate ?? p.client_rate ?? p.workspace_rate,
-        rounding: p.rounding_minutes,
-        model: p.model,
-      });
-      await audit(tx, ctx, "time.created", result.id, {
-        overlap: Boolean(overlap),
-        rateOverride: v.rateOverride,
-      });
-      return result;
+      return createManualEntry(tx, ctx, v);
     },
     key,
   );
+}
+// Shared by manual entry and session approval inside the caller's transaction.
+export async function createManualEntry(
+  tx: Executor,
+  ctx: Context,
+  v: z.output<typeof ManualEntry>,
+) {
+  if (v.rateOverride !== undefined && !ctx.scopes.includes("financial"))
+    throw new AppError(
+      "FORBIDDEN",
+      "Rate overrides require owner financial permission.",
+      403,
+    );
+  const p = await ownedProject(tx, ctx, v.projectId);
+  if (p.status !== "active" || p.client_archived)
+    throw new AppError(
+      "ARCHIVED",
+      "Reopen this project before recording work.",
+    );
+  await ensureTask(tx, ctx, p.id, v.taskId);
+  const start = new Date(v.startedAt),
+    end = new Date(v.endedAt);
+  const duration = (+end - +start) / 1000;
+  if (duration < 1 || duration > 7 * 86400 || +end > Date.now() + 60_000)
+    throw new AppError(
+      "INVALID_DURATION",
+      "Use a past interval between one second and seven days.",
+    );
+  const overlap = await one(
+    sql`SELECT id FROM time_entry WHERE workspace_id=${ctx.workspaceId} AND user_id=${ctx.userId} AND deleted_at IS NULL AND started_at<${end} AND ended_at>${start} LIMIT 1`,
+    tx,
+  );
+  if (overlap && !v.acknowledgeOverlap)
+    throw new AppError(
+      "OVERLAP",
+      "This overlaps existing work. Review the interval or explicitly keep the overlap.",
+      409,
+    );
+  const result = await insertEntry(tx, ctx, {
+    ...v,
+    startedAt: start,
+    endedAt: end,
+    rate: v.rateOverride ?? p.rate ?? p.client_rate ?? p.workspace_rate,
+    rounding: p.rounding_minutes,
+    model: p.model,
+  });
+  await audit(tx, ctx, "time.created", result.id, {
+    overlap: Boolean(overlap),
+    rateOverride: v.rateOverride,
+  });
+  return result;
 }
 export async function timerAction(
   ctx: Context,

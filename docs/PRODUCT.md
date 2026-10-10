@@ -6,7 +6,7 @@ A quiet, precise desktop workspace for an independent developer. The primary loo
 
 The user changed the original web-first brief to a native Rust application with a web-based interface. Use Tauri 2, a Rust native core, and a React/TypeScript interface. Target macOS first. Product naming lives in `brand.json`.
 
-The first complete slice must work without external credentials. Demo payment is conspicuously labeled and cannot invoke a real provider. Successful payment, approval, invoice issuance, and time classification remain separate concepts. USD only. Never infer hours from Git activity.
+The first complete slice must work without external credentials. Demo payment is conspicuously labeled and cannot invoke a real provider. Successful payment, approval, invoice issuance, and time classification remain separate concepts. USD only. Never infer hours from commits alone. Approved local file observations can support explicitly labeled, user-reviewed estimates; they are never measured human-active time.
 
 Design: graphite canvas, warm off-white, restrained amber, compact editorial typography, tabular numbers, visible keyboard focus. Persistent timer, useful empty states, and actions that describe exactly what will happen.
 

@@ -14,6 +14,7 @@ const mail = nodemailer.createTransport({
   host: process.env.SMTP_HOST ?? "127.0.0.1",
   port: Number(process.env.SMTP_PORT ?? 1025),
   secure: process.env.SMTP_SECURE === "true",
+  requireTLS: process.env.SMTP_REQUIRE_TLS === "true",
   ...(process.env.SMTP_USER
     ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } }
     : {}),

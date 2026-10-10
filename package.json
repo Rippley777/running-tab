@@ -27,7 +27,12 @@
     "brand:sync": "tsx scripts/brand.ts",
     "format": "prettier --write src server shared scripts tests docs *.{ts,json,yml} README.md",
     "test:cli": "cargo build -p tab-cli --locked && tsx --env-file=.env scripts/check-cli.ts",
-    "test:seed": "tsx --env-file=.env scripts/check-seed.ts"
+    "test:seed": "tsx --env-file=.env scripts/check-seed.ts",
+    "release:desktop": "node scripts/macos-release.mjs",
+    "release:mac": "node scripts/macos-release.mjs",
+    "release:mac:check": "node scripts/macos-release.mjs --check",
+    "release:mac:sign": "node scripts/macos-release.mjs --sign-only",
+    "test:macos-release": "node --test scripts/macos-release.test.mjs"
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",

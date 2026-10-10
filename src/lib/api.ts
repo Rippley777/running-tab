@@ -60,7 +60,7 @@ export async function api<T = any>(
 export const post = <T = any>(
   path: string,
   data: unknown = {},
-  key = crypto.randomUUID(),
+  key: string = crypto.randomUUID(),
 ) => api<T>(path, { method: "POST", data, key });
 export async function demoLogin() {
   if (native) await invoke("demo_login");

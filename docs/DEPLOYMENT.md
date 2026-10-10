@@ -2,6 +2,22 @@
 
 The architecture is one web/API process, one worker, PostgreSQL and SMTP. No Redis, Kubernetes or proprietary host is required. Tauri is the client; the HTTP server also serves the packaged web interface for authentication and client invoice access.
 
+## Chosen hosted services (September 30, 2026)
+
+Use **Render in Ohio** for a paid PostgreSQL 17 database, a paid web/API service, and a paid continuously running background worker. Use **Postmark** for transactional SMTP. [`render.yaml`](../render.yaml) captures the three Render resources; the API and worker use the database's private connection string. The worker runs `pg-boss` continuously, so a sleeping or expiring free compute tier cannot stall payment reconciliation, recurrence, or outbox delivery. PostgreSQL contains both application data and the durable job queue. No worker disk is needed.
+
+The initial sizes are a 1 GB RAM PostgreSQL instance with 5 GB storage, and one 512 MB instance each for API and worker. These are starting sizes, not measured production capacity. At the published rates checked on this date, estimate **$49.50/month**: PostgreSQL $19, storage $1.50, API $7, worker $7, and Postmark Basic $15 for 10,000 messages. Usage above included limits, taxes, backups beyond Render's retention, and a domain are extra. Recheck prices before purchasing. Render's paid PostgreSQL has a three-day point-in-time recovery window on the Hobby workspace; arrange encrypted logical exports to separate durable storage and test a restore before real financial use. Do not use Render's free PostgreSQL: it expires after 30 days and has no managed recovery.
+
+Sources: [Render pricing](https://render.com/pricing), [Render PostgreSQL recovery](https://render.com/docs/postgresql-backups), [Render background workers](https://render.com/docs/background-workers), [Postmark pricing](https://postmarkapp.com/pricing), [Postmark SMTP settings](https://postmarkapp.com/support/article/common-smtp-connection-errors).
+
+### Provisioning checklist
+
+1. Create and verify a sender domain or sender signature in Postmark. Put its transactional SMTP token access key/secret in `SMTP_USER`/`SMTP_PASSWORD`; use a verified address in `SMTP_FROM`. The Blueprint uses port 587 with required STARTTLS. Do not commit these values.
+2. Connect the repository to Render and review the paid resources in `render.yaml` before creating the Blueprint. Supply `APP_URL` as the exact public HTTPS origin (custom domain or assigned `onrender.com` URL), the Postmark values, and Stripe **test** keys in the prompted fields. Production refuses an example auth secret, demo sign-in and live Stripe keys. The same generated auth secret, URL and provider credentials are passed to the worker by service references.
+3. Keep the database, API and worker in Ohio. The Blueprint blocks public database connections (`ipAllowList: []`); use the private database URL inside Render. Both services run the advisory-locked migrations before starting, so first boot does not depend on manual ordering. Automatic deploys are off until the external sandbox acceptance checks are complete.
+4. Point Stripe's **test** webhook at the public origin and complete the acceptance matrix in [STRIPE.md](STRIPE.md). Build the desktop with `RUNNING_TAB_API_URL` and `RUNNING_TAB_APP_URL` set to that same trusted HTTPS origin. Verify a real Postmark magic link, invoice and receipt; confirm the worker drains operations and housekeeping after a restart.
+5. Configure external encrypted database exports, restore testing, monitoring and alerts for API health, worker liveness, queue failures, delivery failures and storage growth. Render's `/api/health` checks only database connectivity. Do not send real client invoices or claim live payment readiness until the independent review and provider checks in [STATUS.md](STATUS.md) are done.
+
 ## Containers / VM
 
 `Dockerfile` and `deploy.compose.yml` are examples. **They were not built or deployed here because the local Docker daemon was unavailable.** Pin image digests and review resource limits for your deployment. The image retains TypeScript tooling because the server runs through tsx; this is a simple operational choice, not a minimal hardened image.

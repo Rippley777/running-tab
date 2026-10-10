@@ -386,9 +386,14 @@ export type Snapshot = {
   }[];
   repositories: {
     id: string;
-    project_id: string;
+    project_id: string | null;
     identity: string;
     alias: string;
+    tracking_enabled: boolean;
+    billable: boolean;
+    task_id: string | null;
+    branch_rules: import("./development.js").Rule[];
+    version: number;
   }[];
   account: {
     provider: string;

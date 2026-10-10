@@ -21,7 +21,7 @@ export function redact(s: string) {
 }
 export async function linkRepository(
   ctx: Context,
-  input: { projectId: string; identity: string; alias: string },
+  input: { projectId: string | null; identity: string; alias: string },
 ) {
   if (
     !/^[\w.-]+\/[\w./-]+$/.test(input.identity) ||
@@ -33,12 +33,13 @@ export async function linkRepository(
       "Use a sanitized host/owner/repository identity.",
     );
   return mutate(ctx, "repository.link", input, async (tx) => {
-    await required(
-      sql`SELECT id FROM project WHERE workspace_id=${ctx.workspaceId} AND id=${input.projectId}`,
-      tx,
-    );
+    if (input.projectId)
+      await required(
+        sql`SELECT id FROM project WHERE workspace_id=${ctx.workspaceId} AND id=${input.projectId}`,
+        tx,
+      );
     const m = await required(
-      sql`INSERT INTO repository_mapping(workspace_id,project_id,identity,alias) VALUES(${ctx.workspaceId},${input.projectId},${input.identity},${input.alias}) ON CONFLICT(workspace_id,identity) DO UPDATE SET project_id=excluded.project_id,alias=excluded.alias RETURNING *`,
+      sql`INSERT INTO repository_mapping(workspace_id,project_id,identity,alias) VALUES(${ctx.workspaceId},${input.projectId},${input.identity},${input.alias}) ON CONFLICT(workspace_id,identity) DO UPDATE SET project_id=COALESCE(excluded.project_id,repository_mapping.project_id),task_id=CASE WHEN excluded.project_id IS NOT NULL AND excluded.project_id IS DISTINCT FROM repository_mapping.project_id THEN NULL ELSE repository_mapping.task_id END,alias=excluded.alias,version=repository_mapping.version+1 RETURNING *`,
       tx,
     );
     await audit(tx, ctx, "repository.linked", m.id);
@@ -95,6 +96,12 @@ export async function reviewSuggestion(
       sql`SELECT * FROM activity_suggestion WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
       tx,
     );
+    if (s.status !== "pending")
+      throw new AppError(
+        "CONFLICT",
+        "This suggestion was already reviewed.",
+        409,
+      );
     const projectId = input.projectId ?? s.project_id;
     await required(
       sql`SELECT id FROM project WHERE workspace_id=${ctx.workspaceId} AND id=${projectId}`,
@@ -108,10 +115,7 @@ export async function reviewSuggestion(
     await tx.execute(
       sql`UPDATE activity_suggestion SET status=${input.status},project_id=${projectId},time_entry_id=${input.timeEntryId ?? null} WHERE id=${id} AND workspace_id=${ctx.workspaceId}`,
     );
-    if (input.projectId)
-      await tx.execute(
-        sql`UPDATE repository_mapping SET project_id=${projectId} WHERE workspace_id=${ctx.workspaceId} AND id=(SELECT repository_id FROM activity_evidence WHERE id=${s.evidence_id} AND workspace_id=${ctx.workspaceId})`,
-      );
+
     await audit(tx, ctx, "activity.reviewed", id, { status: input.status });
     return { ok: true };
   });

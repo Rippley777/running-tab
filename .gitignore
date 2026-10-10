@@ -18,3 +18,13 @@ coverage/
 .running-tab.json
 
 src-tauri/gen/
+
+# Production macOS release output and local Apple credentials
+/macos-releases/
+*.p8
+*.p12
+*.pfx
+*.keychain
+*.keychain-db
+.env.signing*
+.env.notarization*

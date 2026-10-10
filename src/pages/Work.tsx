@@ -1,3 +1,4 @@
+import { DevelopmentSummary } from "./Development";
 import { BillingChangeForm } from "../components/billing-changes";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -305,6 +306,7 @@ export function Today({ data }: { data: Snapshot }) {
             </div>
           )}
           <TimerCard data={data} />
+          <DevelopmentSummary data={data} />
           <section className="panel recent-work">
             <SectionHeading
               title="Your recent work"

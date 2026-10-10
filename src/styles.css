@@ -3973,3 +3973,38 @@ select {
 .sidebar-status > span:last-child {
   color: #919b87;
 }
+
+.tracking-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 16px;
+}
+.tracking-card {
+  overflow-wrap: anywhere;
+}
+.tracking-card details,
+.tracking-rule,
+.tracking-local {
+  padding-block: 16px;
+  border-top: 1px solid var(--border, #353933);
+  margin-top: 16px;
+}
+.tracking-card .button-group {
+  flex-wrap: wrap;
+  margin-block: 16px;
+}
+.tracking-timeline {
+  padding-left: 24px;
+}
+.tracking-timeline li {
+  margin-block: 14px;
+}
+.tracking-timeline li p {
+  margin: 4px 0;
+}
+.tracking-local p {
+  overflow-wrap: anywhere;
+}
+.tracking-filters > summary {
+  margin-bottom: 16px;
+}

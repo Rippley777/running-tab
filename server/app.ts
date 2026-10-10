@@ -1,4 +1,11 @@
 import {
+  configureRepository,
+  uploadSession,
+  developmentSessions,
+  approveSession,
+  editSession,
+} from "./domain/development.js";
+import {
   splitMilestone,
   adjustBucket,
   changeAgreementTerms,
@@ -688,7 +695,7 @@ export async function createApp() {
         ctx,
         z
           .object({
-            projectId: Id,
+            projectId: Id.nullable(),
             identity: z.string(),
             alias: z.string().max(120).default(""),
           })
@@ -702,6 +709,30 @@ export async function createApp() {
       rows(
         sql`SELECT * FROM repository_mapping WHERE workspace_id=${ctx.workspaceId}`,
       ),
+    ),
+  );
+  app.patch(
+    "/api/v1/repositories/:id",
+    secured("context:write", async (ctx, req) =>
+      configureRepository(ctx, id(req), req.body),
+    ),
+  );
+  app.get(
+    "/api/v1/development-sessions",
+    secured("read", async (ctx) => developmentSessions(ctx)),
+  );
+  app.post(
+    "/api/v1/development-sessions",
+    secured("context:write", async (ctx, req) => uploadSession(ctx, req.body)),
+  );
+  app.patch(
+    "/api/v1/development-sessions/:id",
+    secured("write", async (ctx, req) => editSession(ctx, id(req), req.body)),
+  );
+  app.post(
+    "/api/v1/development-sessions/:id/approve",
+    secured("write", async (ctx, req) =>
+      approveSession(ctx, id(req), req.body, key(req)),
     ),
   );
   app.post(
@@ -733,7 +764,11 @@ export async function createApp() {
         ctx,
         z
           .object({
-            entryIds: z.array(Id).min(1).max(30),
+            entryIds: z.array(Id).max(30).default([]),
+            sessionIds: z.array(Id).max(30).default([]),
+            style: z
+              .enum(["concise", "professional", "detailed", "technical"])
+              .default("professional"),
             useAI: z.boolean().default(false),
             confirmedSharing: z.boolean().default(false),
           })

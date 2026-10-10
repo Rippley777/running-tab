@@ -1,0 +1,120 @@
+# Paid hosting shape for the cloud API and continuously running pg-boss worker.
+# Complete the prompted values in the Render dashboard before the first deploy.
+services:
+  - type: web
+    name: running-tab-api
+    runtime: docker
+    plan: 0.5c-512mb
+    region: ohio
+    autoDeployTrigger: off
+    healthCheckPath: /api/health
+    preDeployCommand: node --import tsx scripts/migrate.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: API_PORT
+        value: "3001"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: running-tab-db
+          property: connectionString
+      - key: APP_URL
+        sync: false
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      - key: DEMO_ENABLED
+        value: "false"
+      - key: BILLING_MODE
+        value: stripe_test
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.postmarkapp.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: SMTP_REQUIRE_TLS
+        value: "true"
+      - key: SMTP_ALLOW_EXTERNAL
+        value: "true"
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+
+  - type: worker
+    name: running-tab-worker
+    runtime: docker
+    plan: 0.5c-512mb
+    region: ohio
+    autoDeployTrigger: off
+    dockerCommand: node --import tsx server/worker.ts
+    preDeployCommand: node --import tsx scripts/migrate.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: running-tab-db
+          property: connectionString
+      - key: APP_URL
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: APP_URL
+      - key: BETTER_AUTH_SECRET
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: BETTER_AUTH_SECRET
+      - key: DEMO_ENABLED
+        value: "false"
+      - key: BILLING_MODE
+        value: stripe_test
+      - key: STRIPE_SECRET_KEY
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: STRIPE_SECRET_KEY
+      - key: SMTP_HOST
+        value: smtp.postmarkapp.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: SMTP_REQUIRE_TLS
+        value: "true"
+      - key: SMTP_ALLOW_EXTERNAL
+        value: "true"
+      - key: SMTP_FROM
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: SMTP_FROM
+      - key: SMTP_USER
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: SMTP_USER
+      - key: SMTP_PASSWORD
+        fromService:
+          name: running-tab-api
+          type: web
+          envVarKey: SMTP_PASSWORD
+
+databases:
+  - name: running-tab-db
+    databaseName: runningtab
+    user: runningtab
+    postgresMajorVersion: "17"
+    plan: 0.5c-1g
+    diskSizeGB: 5
+    region: ohio
+    ipAllowList: []

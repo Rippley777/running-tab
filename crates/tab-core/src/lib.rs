@@ -207,7 +207,10 @@ pub fn sanitize_remote(remote: &str) -> Result<String> {
     Ok(identity)
 }
 fn git(path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(path)
         .args([
@@ -220,15 +223,40 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
         ])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|_| "Git is not installed")?;
-    if !output.status.success() {
-        return Err(
-            "Git metadata could not be read. Select a repository with an origin remote.".into(),
-        );
+    let stdout = child.stdout.take().ok_or("Git output unavailable")?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes);
+        (result, bytes)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err("Git metadata inspection timed out; tracking paused.".into());
+            }
+        }
+    };
+    let (result, bytes) = reader.join().map_err(|_| "Git output task failed")?;
+    if !status.success() || result.is_err() || bytes.len() > 16 * 1024 * 1024 {
+        return Err("Git metadata unavailable or exceeds the safe size limit.".into());
     }
-    String::from_utf8(output.stdout).map_err(|_| "Git output is not valid UTF-8".into())
+    String::from_utf8(bytes).map_err(|_| "Git output is not valid UTF-8".into())
 }
+
 pub fn git_context(
     path: &Path,
     since: &str,
@@ -239,6 +267,7 @@ pub fn git_context(
         return Err("Use --since YYYY-MM-DD".into());
     }
     let identity = sanitize_remote(&git(path, &["remote", "get-url", "origin"])?)?;
+    let head = git(path, &["rev-parse", "--verify", "HEAD"]).unwrap_or_default();
     let branch = if branch_names {
         Some(
             git(path, &["branch", "--show-current"])?
@@ -283,7 +312,11 @@ pub fn git_context(
                 } else {
                     None
                 },
-                branch: branch.clone(),
+                branch: if fields[0] == head.trim() {
+                    branch.clone()
+                } else {
+                    None
+                },
             })
         })
         .collect();
@@ -317,3 +350,5 @@ mod tests {
         assert!(Client::new("http://example.com", "https://example.com").is_err());
     }
 }
+
+pub mod tracking;

@@ -117,3 +117,14 @@ No source code, diffs or local paths. Mapping takes priority over inference. A s
 - `retainers`: bucket/source IDs, signed seconds, kind/reason/time. This is service coverage, not money.
 
 All fields are quoted. Cells beginning with spreadsheet formula/control prefixes are escaped with an apostrophe. CSV exports are portable records, not a complete accounting ledger.
+
+## Development sessions (v1)
+
+- `PATCH /api/v1/repositories/:id`: optimistic `version`, nullable `projectId`, optional `taskId`, `billable`, `trackingEnabled`, and `rules` (`pattern`, nullable `projectId`, optional `taskId`, `billable`). Exact rules precede wildcards; equal precedence is ambiguous. Requires context-write permission.
+- `POST /api/v1/development-sessions`: stable UUID `id`, `repositoryId`, `branch`, UTC `startedAt`/`endedAt`, integer `inferredSeconds`, configured `mergeSeconds` and bounded timestamped evidence. Requires enabled repository and context-write permission. Replays return the original status without replacing edits, including deletion tombstones. The server recomputes the maximum supported estimate.
+- `GET /api/v1/development-sessions`: authenticated owner's latest 1,000 non-deleted sessions; never local paths.
+- `PATCH /api/v1/development-sessions/:id`: owner-write permission, `version` plus `action`: `edit`, `discard`, `delete`, `split` (`splitAt`), or `merge` (`otherId`, `otherVersion`). Draft edits can contain project/task, billable, description, proposed start and duration in seconds. Merge requires identical billing context.
+- `POST /api/v1/development-sessions/:id/approve`: owner-write permission, current `version` and the existing manual-entry payload. An optional idempotency header binds retries to exact input. Creates one reviewed entry with source-session provenance in the same transaction. No overlap override, invoice issuance or payment operation is supported by this endpoint.
+- `POST /api/v1/descriptions`: existing reviewed `entryIds` **or** selected pending `sessionIds`, optional `style` (`concise`, `professional`, `detailed`, `technical`), `useAI`, and `confirmedSharing`. Only saved description text is shared; the bounded existing provider and fallback are reused. It cannot modify time or financial records.
+
+No new external event, Deck or Pit Boss contract is introduced. Migrations 0006–0007 precede API/desktop rollout. Existing CLI commit ingestion and manual/timer endpoints remain supported.

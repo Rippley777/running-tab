@@ -5,6 +5,185 @@ use tauri::{Manager, State};
 struct NativeState {
     client: Client,
     repository: Mutex<Option<std::path::PathBuf>>,
+    tracking: Mutex<TrackingState>,
+}
+struct TrackingState {
+    tracker: tab_core::tracking::Tracker,
+    path: std::path::PathBuf,
+    workspace: Option<String>,
+    error: Option<String>,
+}
+#[tauri::command]
+async fn tracking_state(
+    state: State<'_, NativeState>,
+    workspace_id: String,
+) -> Result<Value, String> {
+    let local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if let Some(error) = &local.error {
+        return Err(error.clone());
+    }
+    if local.workspace.as_ref() != Some(&workspace_id) {
+        return Err("Open your authenticated workspace before viewing local activity.".into());
+    }
+    Ok(serde_json::json!({
+        "repositories":local.tracker.repositories.iter().filter(|r|r.workspace_id==workspace_id).collect::<Vec<_>>(),
+        "sessions":local.tracker.sessions.iter().filter(|s| local.tracker.repositories.iter().any(|r|r.id==s.repository_id&&r.workspace_id==workspace_id)).collect::<Vec<_>>(),
+        "settings":local.tracker.settings,
+    }))
+}
+#[tauri::command]
+async fn tracking_discover(
+    state: State<'_, NativeState>,
+    workspace_id: String,
+    workspace: bool,
+    manual_path: Option<String>,
+) -> Result<Value, String> {
+    {
+        let local = state
+            .tracking
+            .lock()
+            .map_err(|_| "Activity state unavailable")?;
+        if local.workspace.as_ref() != Some(&workspace_id) {
+            return Err("Open your authenticated workspace first".into());
+        }
+    }
+    let path = if let Some(p) = manual_path {
+        std::path::PathBuf::from(p)
+    } else {
+        rfd::AsyncFileDialog::new()
+            .set_title(if workspace {
+                "Choose an approved workspace (up to four levels)"
+            } else {
+                "Choose a repository"
+            })
+            .pick_folder()
+            .await
+            .ok_or("Selection cancelled")?
+            .path()
+            .to_path_buf()
+    };
+    let selected = path.clone();
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        if workspace {
+            tab_core::tracking::discover(&path)
+        } else {
+            Ok(vec![path])
+        }
+    })
+    .await
+    .map_err(|_| "Discovery failed")??;
+    let mut local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if local.workspace.as_ref() != Some(&workspace_id) {
+        return Err("Workspace changed during selection".into());
+    }
+    if local.error.is_some() {
+        return Err("Local activity storage needs repair before tracking".into());
+    }
+    for path in paths {
+        local.tracker.add(&path, &workspace_id)?;
+    }
+    if workspace {
+        let canonical = std::fs::canonicalize(selected).map_err(|_| "Workspace unavailable")?;
+        if !local.tracker.workspaces.contains(&canonical) {
+            local.tracker.workspaces.push(canonical);
+        }
+    }
+    local.tracker.save(&local.path)?;
+    Ok(serde_json::json!({"ok":true}))
+}
+#[tauri::command]
+async fn tracking_configure(
+    state: State<'_, NativeState>,
+    repository_id: String,
+    server_id: Option<String>,
+    mode: String,
+) -> Result<(), String> {
+    if !["manual", "assisted", "automatic"].contains(&mode.as_str()) {
+        return Err("Unknown tracking mode".into());
+    }
+    let mut local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if !local
+        .tracker
+        .repositories
+        .iter()
+        .any(|r| r.id == repository_id && Some(&r.workspace_id) == local.workspace.as_ref())
+    {
+        return Err("Repository is outside the active workspace".into());
+    }
+    local
+        .tracker
+        .finish(&repository_id, "Tracking configuration changed");
+    let r = local
+        .tracker
+        .repositories
+        .iter_mut()
+        .find(|r| r.id == repository_id)
+        .ok_or("Repository not found")?;
+    r.server_id = server_id;
+    r.mode = mode;
+    local.tracker.reset_baselines();
+    local.tracker.save(&local.path)
+}
+#[tauri::command]
+async fn tracking_settings(
+    state: State<'_, NativeState>,
+    settings: tab_core::tracking::Settings,
+) -> Result<(), String> {
+    settings.validate()?;
+    let mut local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if local.workspace.is_none() {
+        return Err("Open your authenticated workspace first".into());
+    }
+    local.tracker.settings = settings;
+    local.tracker.save(&local.path)
+}
+#[tauri::command]
+async fn tracking_finish(
+    state: State<'_, NativeState>,
+    repository_id: String,
+) -> Result<(), String> {
+    let mut local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if !local
+        .tracker
+        .repositories
+        .iter()
+        .any(|r| r.id == repository_id && Some(&r.workspace_id) == local.workspace.as_ref())
+    {
+        return Err("Repository is outside the active workspace".into());
+    }
+    local.tracker.finish(&repository_id, "Finished for review");
+    local.tracker.save(&local.path)
+}
+#[tauri::command]
+async fn tracking_remove_session(state: State<'_, NativeState>, id: String) -> Result<(), String> {
+    let mut local = state
+        .tracking
+        .lock()
+        .map_err(|_| "Activity state unavailable")?;
+    if let Some(session) = local.tracker.sessions.iter().find(|s| s.id == id)
+        && !local.tracker.repositories.iter().any(|r| {
+            r.id == session.repository_id && Some(&r.workspace_id) == local.workspace.as_ref()
+        })
+    {
+        return Err("Session is outside the active workspace".into());
+    }
+    local.tracker.sessions.retain(|s| s.id != id);
+    local.tracker.save(&local.path)
 }
 #[tauri::command]
 async fn open_compact_timer(app: tauri::AppHandle) -> Result<(), String> {
@@ -32,11 +211,36 @@ async fn api_request(
     key: Option<String>,
 ) -> Result<Value, String> {
     let client = state.client.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let snapshot_request = method == "GET" && path.starts_with("/api/v1/snapshot?");
+    let result = tauri::async_runtime::spawn_blocking(move || {
         client.request(&method, &path, body, key.as_deref())
     })
     .await
-    .map_err(|_| "Native request task failed".to_owned())?
+    .map_err(|_| "Native request task failed".to_owned())??;
+    if snapshot_request {
+        let workspace = result["workspace"]["id"]
+            .as_str()
+            .ok_or("Workspace response has no identity")?
+            .to_owned();
+        let mut local = state
+            .tracking
+            .lock()
+            .map_err(|_| "Activity state unavailable")?;
+        if local.workspace.as_ref() != Some(&workspace) {
+            let ids: Vec<_> = local
+                .tracker
+                .repositories
+                .iter()
+                .map(|r| r.id.clone())
+                .collect();
+            for id in ids {
+                local.tracker.finish(&id, "Workspace changed");
+            }
+            local.tracker.reset_baselines();
+            local.workspace = Some(workspace);
+        }
+    }
+    Ok(result)
 }
 #[tauri::command]
 async fn demo_login(state: State<'_, NativeState>) -> Result<(), String> {
@@ -54,6 +258,26 @@ async fn connect_device(state: State<'_, NativeState>, token: String) -> Result<
 }
 #[tauri::command]
 async fn sign_out(state: State<'_, NativeState>) -> Result<(), String> {
+    {
+        let mut local = state
+            .tracking
+            .lock()
+            .map_err(|_| "Activity state unavailable")?;
+        let ids: Vec<_> = local
+            .tracker
+            .repositories
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        for id in ids {
+            local.tracker.finish(&id, "Signed out");
+        }
+        local.workspace = None;
+        local.tracker.reset_baselines();
+        if let Err(error) = local.tracker.save(&local.path) {
+            local.error = Some(error);
+        }
+    }
     let client = state.client.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = client.request("POST", "/api/sign-out", Some(serde_json::json!({})), None);
@@ -171,11 +395,50 @@ pub fn run() {
         }
     };
     tauri::Builder::default()
-        .manage(NativeState {
-            client,
-            repository: Mutex::new(None),
+        .setup(move |app| {
+            let path = app
+                .path()
+                .app_local_data_dir()?
+                .join("development-activity-v1.json");
+            let (tracker, error) = match tab_core::tracking::Tracker::load(&path) {
+                Ok(t) => (t, None),
+                Err(e) => (Default::default(), Some(e)),
+            };
+            app.manage(NativeState {
+                client,
+                repository: Mutex::new(None),
+                tracking: Mutex::new(TrackingState {
+                    tracker,
+                    path,
+                    workspace: None,
+                    error,
+                }),
+            });
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    let state = handle.state::<NativeState>();
+                    if let Ok(mut local) = state.tracking.lock()
+                        && local.error.is_none()
+                        && let Some(workspace) = local.workspace.clone()
+                    {
+                        local.tracker.poll(&workspace, tab_core::tracking::now());
+                        if let Err(error) = local.tracker.save(&local.path) {
+                            local.error = Some(error);
+                        }
+                    }
+                }
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            tracking_state,
+            tracking_discover,
+            tracking_configure,
+            tracking_settings,
+            tracking_finish,
+            tracking_remove_session,
             api_request,
             demo_login,
             connect_device,

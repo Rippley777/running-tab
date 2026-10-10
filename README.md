@@ -56,6 +56,16 @@ After rebuilding an unsigned local app, macOS may ask you to authorize access to
 
 Demo data includes five clients, eight projects, all four billing models, a nearly depleted prepaid bucket, overdue/paid/draft/failed invoices, Git evidence and a forgotten timer. `DEMO_REFERENCE_DATE=YYYY-MM-DD` makes a fresh seed reproducible. Seeding an existing demo changes nothing. **Destructive local reset:** `CONFIRM_RESET=runningtab-local npm run db:reset`; it refuses production and requires demo mode.
 
+## Git-aware tracking
+
+Open **Development → Repositories & tracking setup** in the desktop app. Choose a repository, add its path, or discover repositories inside an explicitly selected workspace. Connect the result, select an existing client/project and optional task, and enable **Assisted** tracking. Add branch overrides for mixed client work; ambiguous rules stay unassigned.
+
+Keep the desktop app running while coding. File metadata changes suggest sessions; commits alone never imply hours. Finish the session for review or let the idle threshold complete it. Review the evidence, adjust duration and description, then **Approve time entry**. Approved time joins the existing invoice workflow; approval never issues an invoice or charges a card. No AI key, GitHub OAuth or manual timer is required.
+
+Web clients review synchronized suggestions but cannot inspect local files. Local paths and raw observations remain on the device. No source files, diffs, keystrokes or screenshots are collected. [Audit matrix, privacy, estimation rules and limitations](docs/GIT_TRACKING.md).
+
+Run `npm test`, `npm run build`, then `npx playwright test --config playwright.development.config.ts` for the isolated session-to-invoice browser check. It uses the separate test database and port 3141; it does not need SMTP, Stripe, or AI. Deploy migrations 0006–0007 and the API before updating desktop clients.
+
 ## Rust CLI
 
 ```sh
@@ -104,3 +114,7 @@ E2E tests create isolated fictional workspaces in the development database; they
 - [Implementation status](docs/STATUS.md)
 
 `brand.json` holds the product name, tagline, version and identifier. `npm run brand:sync` updates native packaging metadata. Brand prose in documentation and human-facing email templates should be reviewed when renaming.
+
+## macOS Release
+
+Run `npm run release:mac:check` to validate prerequisites, then `npm run release:desktop` for Developer ID signed, notarized ARM64, Intel and universal apps/DMGs. See [macOS release setup, credentials, outputs and verification](docs/MACOS_RELEASE.md). Existing development and Windows/Linux commands remain available.

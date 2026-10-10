@@ -1,0 +1,90 @@
+name: Production macOS release
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: macOS architecture
+        type: choice
+        options: [all, arm64, x86_64, universal]
+        default: all
+permissions:
+  contents: read
+concurrency:
+  group: production-macos-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Install repository Rust toolchain and macOS targets
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Import signing identity into temporary CI keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_API_PRIVATE_KEY"
+          security list-keychains -d user > "$RUNNER_TEMP/original-keychains.txt"
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/notary.p8"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -k "$keychain" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          rm "$RUNNER_TEMP/signing.p12"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+      - name: Build, sign, notarize, staple and verify
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          RELEASE_ARCH: ${{ inputs.arch }}
+        run: npm run release:desktop -- --arch "$RELEASE_ARCH"
+      - name: Preserve application permissions and links for download
+        run: tar -czf macos-release.tar.gz -C macos-releases current
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-macos-${{ inputs.arch }}
+          path: macos-release.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-release-logs
+          path: macos-releases/logs/
+          retention-days: 7
+      - name: Remove temporary credentials and restore keychain search list
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/notary.p8"
+          if [ -f "$RUNNER_TEMP/original-keychains.txt" ]; then
+            python3 - <<'PY'
+          import os, shlex, subprocess
+          from pathlib import Path
+          paths = shlex.split(Path(os.environ['RUNNER_TEMP'], 'original-keychains.txt').read_text())
+          subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', *paths], check=True)
+          PY
+          fi
+          if [ -f "$RUNNER_TEMP/release-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/release-signing.keychain-db"
+          fi
